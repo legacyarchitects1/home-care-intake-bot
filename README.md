@@ -38,7 +38,10 @@ src/
   index.ts          Worker entry point — routing, validation, orchestration
   ai.ts             OpenAI call: eligibility read + client message + staff summary
   email.ts          Resend integration — emails the coordinator
-  log.ts            KV-based compliance logging
+  log.ts            KV-based compliance logging (AES-256-GCM encrypted at rest)
+  crypto.ts         AES-256-GCM encrypt/decrypt helpers used by log.ts
+  rateLimit.ts       Per-IP rate limiting for /api/submit
+  turnstile.ts      Optional Cloudflare Turnstile bot-check
   agencyConfigs.ts  Agency config lookup (see "Adding an agency" below)
   types.ts
 configs/
@@ -46,6 +49,8 @@ configs/
 public/
   widget.js         The embeddable script — this is what agencies paste in
   index.html         A stand-in "agency website" for testing the embed
+SECURITY.md         What's actually implemented, control by control
+COMPLIANCE.md        HIPAA/SOC2 gap analysis — read before handling real client data
 ```
 
 ## Local development
@@ -60,17 +65,27 @@ Local dev needs dummy secrets in a `.dev.vars` file (never commit this):
 ```
 OPENAI_API_KEY=sk-...
 RESEND_API_KEY=re_...
+LOG_ENCRYPTION_KEY=...   # generate with: openssl rand -base64 32
 ```
+
+(`TURNSTILE_SECRET_KEY` is optional — omit it locally too; bot-check is
+simply skipped when it's not set.)
 
 Then open `http://localhost:8787` — that's the demo agency page with the widget
 embedded, exactly as a real agency's site would have it.
 
-I already verified locally (with a dummy key, so the OpenAI call fails on
-purpose but everything up to it is proven):
+I already verified locally (with a dummy OpenAI/Resend key, so those calls
+fail on purpose, but everything up to and around them is proven):
 - Valid submissions reach the OpenAI call correctly.
 - Missing/invalid fields are rejected with a clean 400 before anything else runs.
 - Extra fields (e.g. a smuggled `ssn` or `diagnosis`) are silently dropped —
   they never reach the AI call, the email, or the log.
+- Rate limiting: 5 requests from the same IP succeed (well, reach the AI
+  call), the 6th within the same 10-minute window gets a `429`.
+- Encryption: encrypt → decrypt round-trips to the exact original plaintext,
+  the ciphertext contains no recoverable trace of the plaintext, and
+  decrypting with the wrong key throws rather than returning silently
+  corrupted data.
 
 ## Deploying (needs your Cloudflare account — I can't do this part)
 
@@ -84,10 +99,11 @@ npx wrangler login
 # id into wrangler.toml (replacing REPLACE_WITH_REAL_KV_NAMESPACE_ID):
 npx wrangler kv namespace create SUBMISSIONS_LOG
 
-# Set the two secrets (you'll be prompted to paste each value — never put
+# Set the secrets (you'll be prompted to paste each value — never put
 # these in wrangler.toml or any committed file):
 npx wrangler secret put OPENAI_API_KEY
 npx wrangler secret put RESEND_API_KEY
+npx wrangler secret put LOG_ENCRYPTION_KEY   # generate with: openssl rand -base64 32
 
 npx wrangler deploy
 ```
@@ -96,17 +112,35 @@ npx wrangler deploy
 
 - **An OpenAI API key** — new one, doesn't need to be the same as any Make.com
   connection.
-- **A Resend account + API key.** For the milestone-1 "one real test submission
-  that emails a test inbox" goal, Resend's shared test address
+- **A Resend account + API key.** For the milestone-1 "one real *test*
+  submission that emails a test inbox" goal, Resend's shared test address
   (`onboarding@resend.dev`) works with zero setup, but it will only deliver to
-  the email address on your Resend account — good enough to prove the pipeline.
-  For real agency use later, you'll need to verify a sending domain in Resend
-  and update `fromEmail` in each agency's config to an address on that domain
-  (`configs/demo-agency.json` currently has a placeholder
-  `intake@yourdomain.com` that won't send until you do this).
+  the email address on your Resend account — good enough to prove the pipeline
+  with synthetic data. For real agency use later, you'll need to verify a
+  sending domain in Resend and update `fromEmail` in each agency's config to
+  an address on that domain (`configs/demo-agency.json` currently has a
+  placeholder `intake@yourdomain.com` that won't send until you do this) — and
+  read **COMPLIANCE.md before that**, since Resend's BAA status is an open
+  question there.
+- **A `LOG_ENCRYPTION_KEY`** — generate with `openssl rand -base64 32` and
+  store it somewhere safe outside this repo. Losing it makes every logged
+  submission permanently undecryptable; there's no recovery path.
+
+Optional, for bot protection:
+- **A Cloudflare Turnstile site** — create one at
+  `dash.cloudflare.com/?to=/:account/turnstile`, then
+  `wrangler secret put TURNSTILE_SECRET_KEY` (the secret key) and add
+  `data-turnstile-sitekey="..."` (the site key) to the widget's script tag.
+  Skip this entirely and it's simply not enforced.
 
 Once deployed, your Worker gets a `*.workers.dev` URL. The demo page and
 `/widget.js` are both served from that same URL — no separate hosting needed.
+
+**Before sending any real client data through this**: read COMPLIANCE.md.
+Short version — BAAs with OpenAI and Resend (or a swap to a provider that
+has one) aren't in place yet, so real client PHI shouldn't go through this
+system until that's resolved. Synthetic test data for the milestone-1 demo
+is fine.
 
 ## Adding a new agency (milestone 1)
 
@@ -131,29 +165,49 @@ is contained to one file.
 
 That's the entire integration — one script tag, no build step, no dependency
 on the agency's own tech stack. `data-agency` selects which config (branding +
-coordinator email) the widget uses.
+coordinator email) the widget uses. Add `data-turnstile-sitekey="..."` to
+enable the optional bot-check (see "Optional, for bot protection" above) —
+omit it and nothing changes.
 
-## Compliance notes
+## Security & compliance
 
-- The 7-field schema has no SSN, diagnosis, or insurance ID number field —
-  by construction, not by convention.
-- The disclaimer *"This is not a medical or insurance determination. A
-  licensed intake coordinator will contact you."* is shown at the start of
-  every conversation, again after the final AI response, and in the footer of
-  every coordinator email.
-- Every submission is written to KV with an ISO 8601 timestamp
-  (`logSubmission` in `src/log.ts`), keyed as `sub:<agencyId>:<timestamp>:<id>`
-  so a future admin view can range-query by agency and date without a database.
-- If the coordinator email fails to send, the submission is still logged and
-  the client still gets their message — email failure is logged loudly
-  (`console.error`, visible via `wrangler tail`) but doesn't silently drop the
-  lead. Given what happened with the credit-analysis scenario's webhook, I did
-  not want a second thing that fails invisibly.
+Full detail lives in two dedicated documents, kept separate from this README
+because they need to be accurate and complete on their own, not skimmed as a
+few bullet points:
+
+- **SECURITY.md** — every implemented control (data minimization, encryption,
+  rate limiting, CORS rationale, etc.), what's verified vs. what's a known gap.
+- **COMPLIANCE.md** — an honest HIPAA/SOC2 gap analysis: what's in place,
+  what needs Damon's direct action (BAAs, an audit engagement), and a
+  suggested sequencing so effort goes where it's actually blocking, not
+  toward compliance theater for a pre-revenue product.
+
+The short version: this system is built to be HIPAA-*appropriate* by
+design (data minimization, encryption, audit logging) but is not yet
+HIPAA-*compliant* in the legal sense — the missing pieces (signed BAAs with
+OpenAI and Resend) are things only Damon can put in place. Real client PHI
+shouldn't flow through this until COMPLIANCE.md's open items are resolved.
+
+If the coordinator email fails to send, the submission is still logged and
+the client still gets their message — email failure is logged loudly
+(`console.error`, visible via `wrangler tail`) but doesn't silently drop the
+lead. Given what happened with the credit-analysis scenario's webhook, I did
+not want a second thing that fails invisibly.
 
 ## What's left for the first milestone
 
 Everything is built and locally verified except the parts that need your
-credentials: creating the KV namespace, setting the two secrets, running
-`wrangler deploy`, and sending one real submission through to confirm an email
-actually lands in a test inbox. Ping me once deployed (or once you've set the
-secrets) and I can help verify the live end-to-end run.
+credentials: creating the KV namespace, setting the three secrets, running
+`wrangler deploy`, and sending one real (synthetic-data) submission through
+to confirm an email actually lands in a test inbox. Ping me once deployed
+(or once you've set the secrets) and I can help verify the live end-to-end
+run.
+
+## Open architectural question — not yet built, needs a decision
+
+An admin dashboard (view submissions, manage per-agency config, review the
+audit log) doesn't exist yet. It's the natural home for authenticated
+access, RBAC, and MFA — none of which have anything to attach to without it.
+This is a real multi-day addition, not a small patch, so it's deliberately
+not started until it's confirmed as wanted. See COMPLIANCE.md's "MFA / RBAC"
+section.

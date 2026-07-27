@@ -8,6 +8,7 @@
     return;
   }
   var apiBase = scriptEl.getAttribute("data-api") || new URL(scriptEl.src).origin;
+  var turnstileSiteKey = scriptEl.getAttribute("data-turnstile-sitekey"); // optional, see README
 
   var QUESTIONS = [
     { key: "name", prompt: "First, what's your name?", type: "text", placeholder: "Your name" },
@@ -68,6 +69,59 @@
 
   var state = { step: 0, answers: {}, submitting: false, done: false };
   var branding = null;
+  var turnstileToken = null;
+
+  // Turnstile is entirely optional (see data-turnstile-sitekey above). When
+  // present, we render an invisible/managed challenge once the panel opens
+  // and hold the resulting token until submission — the server only checks
+  // it if TURNSTILE_SECRET_KEY is configured on the Worker, so this stays a
+  // no-op end to end unless both sides are explicitly turned on.
+  function setUpTurnstile(panel) {
+    if (!turnstileSiteKey) return;
+
+    var container = el("div", { id: "icb-turnstile", style: { display: "none" } });
+    panel.appendChild(container);
+
+    var scriptId = "icb-turnstile-script";
+    function render() {
+      if (!window.turnstile) return;
+      window.turnstile.render(container, {
+        sitekey: turnstileSiteKey,
+        size: "invisible",
+        callback: function (token) {
+          turnstileToken = token;
+        },
+      });
+    }
+
+    if (window.turnstile) {
+      render();
+    } else if (!document.getElementById(scriptId)) {
+      var script = el("script", { id: scriptId });
+      script.src = "https://challenges.cloudflare.com/turnstile/v0/api.js";
+      script.async = true;
+      script.onload = render;
+      document.head.appendChild(script);
+    }
+  }
+
+  function waitForTurnstileToken(timeoutMs) {
+    if (!turnstileSiteKey) return Promise.resolve(undefined);
+    if (turnstileToken) return Promise.resolve(turnstileToken);
+
+    return new Promise(function (resolve, reject) {
+      var waited = 0;
+      var interval = setInterval(function () {
+        if (turnstileToken) {
+          clearInterval(interval);
+          resolve(turnstileToken);
+        } else if ((waited += 250) >= timeoutMs) {
+          clearInterval(interval);
+          reject(new Error("Bot verification timed out."));
+        }
+      }, 250);
+    });
+  }
 
   function el(tag, attrs, children) {
     var node = document.createElement(tag);
@@ -212,13 +266,15 @@
     state.submitting = true;
     renderInputArea(inputArea, messages);
 
-    var payload = Object.assign({ agencyId: agencyId }, state.answers);
-
-    fetch(apiBase + "/api/submit", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    })
+    waitForTurnstileToken(8000)
+      .then(function (token) {
+        var payload = Object.assign({ agencyId: agencyId, turnstileToken: token }, state.answers);
+        return fetch(apiBase + "/api/submit", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        });
+      })
       .then(function (res) {
         return res.json().then(function (data) {
           if (!res.ok) throw new Error(data.error || "Request failed.");
@@ -292,6 +348,7 @@
 
         document.body.appendChild(bubble);
         document.body.appendChild(panel);
+        setUpTurnstile(panel);
       })
       .catch(function (err) {
         console.error("[intake-widget] Failed to initialize:", err);

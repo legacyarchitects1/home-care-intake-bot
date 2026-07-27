@@ -2,22 +2,42 @@ import { getAgencyBranding, getAgencyConfig } from "./agencyConfigs";
 import { generateIntakeAssessment } from "./ai";
 import { sendCoordinatorEmail } from "./email";
 import { logSubmission } from "./log";
+import { checkRateLimit } from "./rateLimit";
+import { verifyTurnstileToken } from "./turnstile";
 import type { AgeBand, Env, IntakeSubmission, PaymentType, Relationship } from "./types";
 
+// CORS is intentionally wide open (any origin): this API is meant to be
+// called from the /api/submit and /api/config endpoints by a widget
+// embedded on arbitrary third-party agency websites, none of which are
+// known in advance. There's no cookie/session auth anywhere in this app for
+// a permissive CORS policy to put at risk — every request is independently
+// validated on its own merits (rate limit, Turnstile if configured, field
+// validation), not trusted because of its Origin header.
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type",
 };
 
+const SECURITY_HEADERS = {
+  "X-Content-Type-Options": "nosniff",
+  "X-Frame-Options": "DENY",
+  "Referrer-Policy": "strict-origin-when-cross-origin",
+};
+
 const RELATIONSHIPS: Relationship[] = ["self", "family_member", "other"];
 const AGE_BANDS: AgeBand[] = ["under_18", "18_64", "65_plus"];
 const PAYMENT_TYPES: PaymentType[] = ["medicaid", "medicare", "private_pay", "not_sure"];
 
-function json(body: unknown, status = 200): Response {
+function json(body: unknown, status = 200, extraHeaders?: Record<string, string>): Response {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { "Content-Type": "application/json", ...CORS_HEADERS },
+    headers: {
+      "Content-Type": "application/json",
+      ...CORS_HEADERS,
+      ...SECURITY_HEADERS,
+      ...extraHeaders,
+    },
   });
 }
 
@@ -68,11 +88,34 @@ async function handleGetConfig(agencyId: string): Promise<Response> {
 }
 
 async function handleSubmit(request: Request, env: Env): Promise<Response> {
+  // Rate limit before doing any real work — this is the check that protects
+  // against scripted abuse racking up real OpenAI/Resend costs, so it needs
+  // to run first, cheaply, before JSON parsing or anything else.
+  const rateLimitResult = await checkRateLimit(env, request);
+  if (!rateLimitResult.allowed) {
+    return json(
+      { error: "Too many submissions. Please try again shortly." },
+      429,
+      { "Retry-After": String(rateLimitResult.retryAfterSeconds) },
+    );
+  }
+
   let body: unknown;
   try {
     body = await request.json();
   } catch {
     return json({ error: "Invalid JSON body." }, 400);
+  }
+
+  if (env.TURNSTILE_SECRET_KEY) {
+    const token = typeof (body as Record<string, unknown>)?.turnstileToken === "string"
+      ? ((body as Record<string, unknown>).turnstileToken as string)
+      : undefined;
+    const ip = request.headers.get("CF-Connecting-IP") || "unknown";
+    const verified = await verifyTurnstileToken(token, env.TURNSTILE_SECRET_KEY, ip);
+    if (!verified) {
+      return json({ error: "Bot verification failed. Please reload and try again." }, 403);
+    }
   }
 
   const submissionOrError = validateSubmission(body);
@@ -135,7 +178,7 @@ export default {
     const url = new URL(request.url);
 
     if (request.method === "OPTIONS") {
-      return new Response(null, { status: 204, headers: CORS_HEADERS });
+      return new Response(null, { status: 204, headers: { ...CORS_HEADERS, ...SECURITY_HEADERS } });
     }
 
     if (request.method === "GET" && url.pathname.startsWith("/api/config/")) {
