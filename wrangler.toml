@@ -1,0 +1,21 @@
+name = "home-care-intake-bot"
+main = "src/index.ts"
+compatibility_date = "2024-09-25"
+
+# Serves everything in /public as static assets (e.g. GET /widget.js).
+# Requires Wrangler 3.60+. If your installed wrangler is older, upgrade it
+# (`npm install -D wrangler@latest`) rather than switching to Workers Sites.
+[assets]
+directory = "./public"
+binding = "ASSETS"
+
+# KV namespace for compliance logging (every submission, timestamped).
+# Create it with: wrangler kv namespace create SUBMISSIONS_LOG
+# then paste the returned id below.
+[[kv_namespaces]]
+binding = "SUBMISSIONS_LOG"
+id = "REPLACE_WITH_REAL_KV_NAMESPACE_ID"
+
+# Secrets (never put real values here — set them with `wrangler secret put`):
+#   wrangler secret put OPENAI_API_KEY
+#   wrangler secret put RESEND_API_KEY

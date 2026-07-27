@@ -1,0 +1,12 @@
+{
+  "agencyId": "demo-agency",
+  "agencyName": "CareR Us",
+  "logoUrl": null,
+  "primaryColor": "#2E7380",
+  "textColor": "#0F2336",
+  "tagline": "Home care that treats you like family.",
+  "coordinatorEmail": "taylormadesalescorp@gmail.com",
+  "coordinatorName": "Intake Coordinator",
+  "fromEmail": "intake@yourdomain.com",
+  "servicesOffered": "In-home personal care and companion care for older adults and adults with disabilities living at home, including help with bathing/dressing, meal prep, light housekeeping, medication reminders, and transportation to appointments. Does not provide skilled nursing, live-in 24/7 medical care, or facility-based care."
+}

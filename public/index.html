@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Demo Agency Website — Intake Widget Preview</title>
+<style>
+  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;max-width:720px;margin:60px auto;padding:0 20px;color:#0F2336;line-height:1.6;}
+  h1{margin-bottom:4px;}
+  .note{background:#f4f6f7;border:1px solid #e3e7e9;border-radius:10px;padding:16px 20px;font-size:14px;color:#4a5a68;}
+</style>
+</head>
+<body>
+  <h1>CareR Us — Home Care Services</h1>
+  <p>This page stands in for a real home care agency's website. The chat bubble in the bottom-right corner is the embedded intake widget — nothing else on this page is wired up.</p>
+  <div class="note">
+    <strong>This is a demo/test harness, not a real agency page.</strong> Click the chat bubble, answer the questions,
+    and on submission it will call OpenAI for the eligibility read + warm reply, then email the configured
+    coordinator address via Resend, and log the submission to KV.
+  </div>
+
+  <!-- This is the exact embed snippet a real agency would paste into their site. -->
+  <script src="/widget.js" data-agency="demo-agency"></script>
+</body>
+</html>
